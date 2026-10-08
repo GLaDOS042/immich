@@ -5,6 +5,7 @@ from immich_ml.config import settings
 from immich_ml.models.clip.textual import OpenClipTextualEncoder
 from immich_ml.models.clip.visual import OpenClipVisualEncoder
 from immich_ml.models.embedding_gemma2 import (
+    DynamicOrtSession,
     EmbeddingGemma2TextualEncoder,
     EmbeddingGemma2VisualEncoder,
     _prepare_image,
@@ -72,3 +73,18 @@ def test_square_image_uses_256_soft_tokens_at_default_budget() -> None:
     _, _, soft_tokens = _prepare_image(image, 280)
 
     assert soft_tokens == 256
+
+
+def test_multimodal_components_use_separate_ort_cache_markers(mocker: MockerFixture) -> None:
+    graph = mocker.patch("immich_ml.models.embedding_gemma2.OrtGraph")
+    mocker.patch("immich_ml.models.embedding_gemma2._providers_default", return_value=["CPUExecutionProvider"])
+    mocker.patch("immich_ml.models.embedding_gemma2._disabled_optimizers_default", return_value=[])
+
+    DynamicOrtSession("/cache/onnx/model.onnx", cache_marker=1)
+    DynamicOrtSession("/cache/onnx/vision_encoder.onnx", cache_marker=2)
+
+    text_spec = graph.call_args_list[0].args[0]
+    vision_spec = graph.call_args_list[1].args[0]
+    assert text_spec.pins == {"embedding_gemma2_component": 1}
+    assert vision_spec.pins == {"embedding_gemma2_component": 2}
+    assert text_spec.directory != vision_spec.directory
