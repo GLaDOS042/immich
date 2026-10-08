@@ -1,3 +1,5 @@
+import numpy as np
+import pytest
 from PIL import Image
 from pytest_mock import MockerFixture
 
@@ -8,6 +10,7 @@ from immich_ml.models.embedding_gemma2 import (
     DynamicOrtSession,
     EmbeddingGemma2TextualEncoder,
     EmbeddingGemma2VisualEncoder,
+    _normalize_embedding,
     _prepare_image,
     _tokenize,
     is_embedding_gemma2_alias,
@@ -95,6 +98,30 @@ def test_tokenize_does_not_duplicate_existing_bos(mocker: MockerFixture) -> None
     input_ids, _ = _tokenize(tokenizer, "query", 4, truncate=True)
 
     assert input_ids.tolist() == [[2, 101, 0, 0]]
+
+
+def test_normalize_embedding_enforces_768_dimensions_and_unit_norm() -> None:
+    output = np.arange(1, 769, dtype=np.float32)[None, :]
+
+    embedding = _normalize_embedding(output)
+
+    assert embedding.shape == (768,)
+    assert np.isclose(np.linalg.norm(embedding), 1.0)
+
+
+def test_normalize_embedding_rejects_wrong_dimension() -> None:
+    with pytest.raises(RuntimeError, match="768"):
+        _normalize_embedding(np.ones((1, 512), dtype=np.float32))
+
+
+def test_normalize_embedding_rejects_non_finite_or_zero_vectors() -> None:
+    non_finite = np.ones((1, 768), dtype=np.float32)
+    non_finite[0, 1] = np.nan
+    with pytest.raises(RuntimeError, match="non-finite"):
+        _normalize_embedding(non_finite)
+
+    with pytest.raises(RuntimeError, match="zero or invalid"):
+        _normalize_embedding(np.zeros((1, 768), dtype=np.float32))
 
 
 def test_multimodal_components_use_separate_ort_cache_markers(mocker: MockerFixture) -> None:
