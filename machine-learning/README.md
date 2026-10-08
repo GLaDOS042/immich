@@ -18,7 +18,7 @@ To measure inference throughput and latency, you can use [Locust](https://locust
 Locust works by querying the model endpoints and aggregating their statistics, meaning the app must be deployed.
 You can change the models or adjust options like score thresholds through the Locust UI.
 
-To get started, you can simply run `locust --web-host 127.0.0.1` and open `localhost:8089` in your browser to access the UI. See the [Locust documentation](https://docs.locust.io/en/stable/index.html) for more info on running Locust.
+To get started, you can simply run `locust --web-host 127.0.0.1` and open `localhost:8089` in a browser to access the UI. See the [Locust documentation](https://docs.locust.io/en/stable/index.html) for more info on running Locust.
 
 Note that in Locust's jargon, concurrency is measured in `users`, and each user runs one task at a time. To achieve a particular per-endpoint concurrency, multiply that number by the number of endpoints to be queried. For example, if there are 3 endpoints and you want each of them to receive 8 requests at a time, you should set the number of users to 24.
 
@@ -106,3 +106,29 @@ immich-machine-learning:
 ```
 
 The first text+vision load downloads the fp32 ONNX text and vision artifacts into the normal ML cache. The normal Immich model TTL/cache behavior remains in effect.
+
+## API smoke test
+
+After starting the custom ML container on port `3003`, verify the current Immich text-encoding API contract directly:
+
+```bash
+curl -sS \
+  -F 'entries={"clip":{"textual":{"modelName":"ViT-B-16-SigLIP-256__webli"}}}' \
+  -F 'text=cat sleeping on a sofa' \
+  http://127.0.0.1:3003/predict \
+  | jq '.clip | fromjson | length'
+```
+
+The result must be `768`.
+
+For an image:
+
+```bash
+curl -sS \
+  -F 'entries={"clip":{"visual":{"modelName":"ViT-B-16-SigLIP-256__webli"}}}' \
+  -F 'image=@/path/to/photo.jpg' \
+  http://127.0.0.1:3003/predict \
+  | jq '{embedding: (.clip | fromjson | length), imageHeight, imageWidth}'
+```
+
+The `embedding` field must be `768`. With the ROCm image, the ML log should also show `MIGraphXExecutionProvider` first in the execution-provider list.
