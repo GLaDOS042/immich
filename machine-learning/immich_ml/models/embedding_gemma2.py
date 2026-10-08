@@ -138,7 +138,11 @@ def _tokenize(
     context_length: int,
     *,
     truncate: bool,
+    reserve_padding: int = 0,
 ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    if reserve_padding < 0 or reserve_padding >= context_length:
+        raise ValueError(f"reserve_padding must be between 0 and {context_length - 1}")
+
     encoding = tokenizer.encode(text)
     ids = np.asarray(encoding.ids, dtype=np.int64)
 
@@ -149,13 +153,14 @@ def _tokenize(
     if bos_id is not None and (ids.size == 0 or int(ids[0]) != bos_id):
         ids = np.concatenate((np.asarray([bos_id], dtype=np.int64), ids))
 
-    if ids.size > context_length:
+    usable_length = context_length - reserve_padding
+    if ids.size > usable_length:
         if not truncate:
             raise ValueError(
                 f"EmbeddingGemma 2 input requires {ids.size} tokens, "
-                f"but context is configured for {context_length}"
+                f"but only {usable_length} are available after reserving {reserve_padding} padding slots"
             )
-        ids = ids[:context_length]
+        ids = ids[:usable_length]
 
     pad_id = tokenizer.token_to_id("<pad>")
     if pad_id is None:
@@ -166,6 +171,59 @@ def _tokenize(
     input_ids[0, : ids.size] = ids
     attention_mask[0, : ids.size] = 1
     return input_ids, attention_mask
+
+
+def _mask_absent_modalities(
+    input_ids: NDArray[np.int64],
+    attention_mask: NDArray[np.int64],
+    model_cfg: dict[str, Any],
+    hidden_size: int,
+    *,
+    image_features: NDArray[np.float32] | None = None,
+) -> tuple[NDArray[np.int64], NDArray[np.int64], dict[str, NDArray[np.float32]]]:
+    """Represent absent media with one attention-masked dummy token and feature row.
+
+    The reference runtime uses zero-row media tensors for absent modalities. MIGraphX currently
+    compiles those shapes but can segfault when executing them. A dummy token in padding has
+    attention_mask=0, so it is excluded from attention and mean pooling while keeping every
+    modality tensor non-empty for the execution provider.
+    """
+
+    ids = input_ids.copy()
+    mask = attention_mask.copy()
+    feature_map: dict[str, NDArray[np.float32] | None] = {
+        "image": None if image_features is None else np.asarray(image_features, dtype=np.float32),
+        "video": None,
+        "audio": None,
+    }
+    absent = [modality for modality, values in feature_map.items() if values is None]
+    padding = np.flatnonzero(mask[0] == 0)
+    if padding.size < len(absent):
+        raise RuntimeError(
+            f"EmbeddingGemma 2 needs {len(absent)} padding slots for masked MIGraphX modality sentinels, "
+            f"but only {padding.size} are available"
+        )
+
+    for modality, position in zip(absent, padding[: len(absent)], strict=True):
+        token_key = f"{modality}_token_id"
+        if token_key not in model_cfg:
+            raise RuntimeError(f"EmbeddingGemma 2 config has no '{token_key}'")
+        ids[0, int(position)] = int(model_cfg[token_key])
+        feature_map[modality] = np.zeros((1, hidden_size), dtype=np.float32)
+
+    media_feed: dict[str, NDArray[np.float32]] = {}
+    for modality, values in feature_map.items():
+        if values is None:
+            raise RuntimeError(f"EmbeddingGemma 2 failed to populate {modality} features")
+        token_id = int(model_cfg[f"{modality}_token_id"])
+        token_count = int(np.count_nonzero(ids == token_id))
+        if token_count != values.shape[0]:
+            raise RuntimeError(
+                f"EmbeddingGemma 2 has {token_count} {modality} tokens but {values.shape[0]} {modality} features"
+            )
+        media_feed[f"{modality}_features"] = values
+
+    return ids, mask, media_feed
 
 
 def _run_output(graph: ModelGraph, output_name: str, feed: dict[str, Any]) -> NDArray[Any]:
@@ -278,6 +336,12 @@ class PinnedOrtSession:
 
     def for_feed(self, feed: dict[str, Any]) -> ModelGraph:
         overrides = _shape_overrides(self.model_path, feed)
+        if self.providers[0] == "MIGraphXExecutionProvider":
+            zero_dims = [name for name, size in overrides if size == 0]
+            if zero_dims:
+                joined = ", ".join(zero_dims)
+                raise RuntimeError(f"Refusing zero-length MIGraphX dimensions for EmbeddingGemma 2: {joined}")
+
         if (graph := self.graphs.get(overrides)) is not None:
             return graph
 
@@ -388,13 +452,17 @@ class BaseEmbeddingGemma2Encoder[O: Options](InferenceModel[O]):
         *,
         image_features: NDArray[np.float32] | None = None,
     ) -> str:
-        empty = np.empty((0, self.hidden_size), dtype=np.float32)
+        input_ids, attention_mask, media_feed = _mask_absent_modalities(
+            input_ids,
+            attention_mask,
+            self.model_cfg,
+            self.hidden_size,
+            image_features=image_features,
+        )
         feed: dict[str, Any] = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "image_features": empty if image_features is None else image_features.astype(np.float32, copy=False),
-            "video_features": empty,
-            "audio_features": empty,
+            **media_feed,
         }
         session = cast(PinnedOrtSession, self.session)
         graph = session.for_feed(feed)
@@ -412,7 +480,13 @@ class EmbeddingGemma2TextualEncoder(BaseEmbeddingGemma2Encoder[TextualOptions]):
 
     def _predict(self, inputs: str, options: TextualOptions) -> str:
         query = f"task: search result | query: {clean_text(inputs)}"
-        input_ids, attention_mask = _tokenize(self.tokenizer, query, self.context_length, truncate=True)
+        input_ids, attention_mask = _tokenize(
+            self.tokenizer,
+            query,
+            self.context_length,
+            truncate=True,
+            reserve_padding=3,
+        )
         return self._main_embedding(input_ids, attention_mask)
 
 
@@ -476,7 +550,13 @@ class EmbeddingGemma2VisualEncoder(BaseEmbeddingGemma2Encoder[VisualOptions]):
         image_features = image_features[:num_soft_tokens]
 
         prompt = "<|image>" + "<|image|>" * num_soft_tokens + "<image|>"
-        input_ids, attention_mask = _tokenize(self.tokenizer, prompt, self.context_length, truncate=False)
+        input_ids, attention_mask = _tokenize(
+            self.tokenizer,
+            prompt,
+            self.context_length,
+            truncate=False,
+            reserve_padding=2,
+        )
         image_token_id = int(self.model_cfg["image_token_id"])
         if int(np.count_nonzero(input_ids == image_token_id)) != num_soft_tokens:
             raise RuntimeError("EmbeddingGemma 2 tokenizer produced the wrong number of image placeholders")
