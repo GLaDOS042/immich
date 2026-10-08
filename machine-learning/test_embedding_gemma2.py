@@ -7,12 +7,12 @@ from immich_ml.config import settings
 from immich_ml.models.clip.textual import OpenClipTextualEncoder
 from immich_ml.models.clip.visual import OpenClipVisualEncoder
 from immich_ml.models.embedding_gemma2 import (
-    DynamicOrtSession,
-    EmbeddingGemma2TextualEncoder,
-    EmbeddingGemma2VisualEncoder,
     _normalize_embedding,
     _prepare_image,
     _tokenize,
+    DynamicOrtSession,
+    EmbeddingGemma2TextualEncoder,
+    EmbeddingGemma2VisualEncoder,
     is_embedding_gemma2_alias,
 )
 from immich_ml.pipeline import Clip, PipelineRequest, Slot
