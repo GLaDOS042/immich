@@ -137,6 +137,13 @@ def _tokenize(
     encoding = tokenizer.encode(text)
     ids = np.asarray(encoding.ids, dtype=np.int64)
 
+    # Gemma tokenizers add a BOS token by default. The low-level tokenizers
+    # JSON may or may not encode that policy in its post-processor, so make
+    # the behavior explicit while avoiding a duplicate BOS if it is present.
+    bos_id = tokenizer.token_to_id("<bos>")
+    if bos_id is not None and (ids.size == 0 or int(ids[0]) != bos_id):
+        ids = np.concatenate((np.asarray([bos_id], dtype=np.int64), ids))
+
     if ids.size > context_length:
         if not truncate:
             raise ValueError(
