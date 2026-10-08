@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     max_batch_size: MaxBatchSize = MaxBatchSize()
     model_organization: ModelOrganization = ModelOrganization.APP
     model_revision: str = "main"
+    embedding_gemma2_alias: str | None = None
+    embedding_gemma2_repo: str = "onnx-community/embeddinggemma-2-ONNX"
+    embedding_gemma2_revision: str = "main"
+    embedding_gemma2_vision_tokens: int = 280
+    embedding_gemma2_text_context: int = 128
+    embedding_gemma2_visual_context: int = 384
 
     @property
     def legacy_models(self) -> bool:
@@ -144,23 +150,18 @@ class CustomRichHandler(RichHandler):
         return super().emit(record)
 
 
-log = logging.getLogger("ml.log")
-log.setLevel(LOG_LEVEL)
-
-
 # patches this issue https://github.com/encode/uvicorn/discussions/1803
 class CustomUvicornServer(Server):
     async def shutdown(self, sockets: list[socket] | None = None) -> None:
         for sock in sockets or []:
             sock.close()
-        await super().shutdown()
+        await super().shutdown(sockets)
 
 
 class CustomUvicornWorker(UvicornWorker):
     async def _serve(self) -> None:
         self.config.app = self.wsgi
         server = CustomUvicornServer(config=self.config)
-        self._install_sigquit_handler()
         await server.serve(sockets=self.sockets)
         if not server.started:
             sys.exit(Arbiter.WORKER_BOOT_ERROR)
