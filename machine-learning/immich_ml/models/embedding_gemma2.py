@@ -29,6 +29,7 @@ from immich_ml.schemas import (
 )
 from immich_ml.sessions.ort import GraphSpec, OrtGraph, _disabled_optimizers_default, _providers_default
 
+_EMBEDDING_DIM = 768
 _SUPPORTED_VISION_TOKENS = (70, 140, 280, 560, 1120)
 _COMMON_FILES = (
     "config.json",
@@ -177,6 +178,23 @@ def _run_output(graph: ModelGraph, output_name: str, feed: dict[str, Any]) -> ND
     return graph.run([output_name], filtered)[0]
 
 
+def _normalize_embedding(output: NDArray[Any]) -> NDArray[np.float32]:
+    embedding = np.asarray(output, dtype=np.float32)
+    if embedding.ndim == 0:
+        raise RuntimeError("EmbeddingGemma 2 returned a scalar instead of an embedding")
+    embedding = embedding.reshape(-1, embedding.shape[-1])[0]
+    if embedding.shape[0] != _EMBEDDING_DIM:
+        raise RuntimeError(
+            f"EmbeddingGemma 2 returned {embedding.shape[0]} dimensions; Immich alias requires {_EMBEDDING_DIM}"
+        )
+    if not np.all(np.isfinite(embedding)):
+        raise RuntimeError("EmbeddingGemma 2 returned non-finite embedding values")
+    norm = float(np.linalg.norm(embedding))
+    if not math.isfinite(norm) or norm <= 0:
+        raise RuntimeError("EmbeddingGemma 2 returned a zero or invalid embedding norm")
+    return embedding / norm
+
+
 class EmbeddingGemma2GraphSpec(GraphSpec):
     """Keep the upstream fp32 export intact instead of applying Immich's generic fp16 narrowing."""
 
@@ -300,11 +318,7 @@ class BaseEmbeddingGemma2Encoder[O: Options](InferenceModel[O]):
             "video_features": empty,
             "audio_features": empty,
         }
-        embedding = np.asarray(_run_output(graph, "sentence_embedding", feed), dtype=np.float32)
-        embedding = embedding.reshape(-1, embedding.shape[-1])[0]
-        norm = float(np.linalg.norm(embedding))
-        if norm > 0:
-            embedding = embedding / norm
+        embedding = _normalize_embedding(_run_output(graph, "sentence_embedding", feed))
         return serialize_np_array(embedding)
 
 
