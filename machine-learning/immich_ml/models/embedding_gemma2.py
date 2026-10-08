@@ -173,10 +173,20 @@ def _run_output(graph: ModelGraph, output_name: str, feed: dict[str, Any]) -> ND
 class DynamicOrtSession:
     """Immich ORT session that leaves multimodal dimensions dynamic."""
 
-    def __init__(self, model_path: Path | str, threads: int = 2) -> None:
+    def __init__(self, model_path: Path | str, cache_marker: int, threads: int = 2) -> None:
         providers = _providers_default()
         disabled_optimizers = _disabled_optimizers_default(providers)
-        spec = GraphSpec(Path(model_path), {}, [], providers, disabled_optimizers, threads)
+        # Text and vision ONNX files share one source directory. GraphSpec normally keys its
+        # prepared/provider cache by the pinned dimensions under that directory, so give each
+        # component a distinct cache-only marker while leaving free-dimension overrides empty.
+        spec = GraphSpec(
+            Path(model_path),
+            {"embedding_gemma2_component": cache_marker},
+            [],
+            providers,
+            disabled_optimizers,
+            threads,
+        )
         self.graph = OrtGraph(spec)
         self.shapes = (Shape(batch=1),)
         self.batches = (1,)
@@ -252,7 +262,7 @@ class BaseEmbeddingGemma2Encoder[O: Options](InferenceModel[O]):
         raise NotImplementedError
 
     def _load(self) -> ModelSession:
-        return DynamicOrtSession(self.model_path, threads=self.threads)
+        return DynamicOrtSession(self.model_path, cache_marker=1, threads=self.threads)
 
     def build(self) -> None:
         # The generic OrtSession warm-up cannot synthesize valid zero-length
@@ -316,7 +326,7 @@ class EmbeddingGemma2VisualEncoder(BaseEmbeddingGemma2Encoder[VisualOptions]):
         return self.model_dir / "vision_encoder.onnx"
 
     def _load(self) -> ModelSession:
-        self.vision_session = DynamicOrtSession(self.vision_model_path, threads=self.threads)
+        self.vision_session = DynamicOrtSession(self.vision_model_path, cache_marker=2, threads=self.threads)
         return super()._load()
 
     def unload(self) -> None:
