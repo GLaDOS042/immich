@@ -36,7 +36,9 @@ jobs:
         run: uv sync --locked --extra cpu --group dev
 
       - name: Ruff
-        run: uv run ruff check immich_ml/models/embedding_gemma2.py immich_ml/pipeline.py immich_ml/config.py test_embedding_gemma2.py
+        run: |
+          uv run ruff check --fix immich_ml/models/embedding_gemma2.py immich_ml/pipeline.py immich_ml/config.py test_embedding_gemma2.py
+          git diff --exit-code
 
       - name: Mypy
         run: uv run mypy --strict immich_ml/models/embedding_gemma2.py immich_ml/pipeline.py test_embedding_gemma2.py
