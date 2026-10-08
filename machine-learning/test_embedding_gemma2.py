@@ -110,3 +110,19 @@ def test_multimodal_components_use_separate_ort_cache_markers(mocker: MockerFixt
     assert text_spec.pins == {"embedding_gemma2_component": 1}
     assert vision_spec.pins == {"embedding_gemma2_component": 2}
     assert text_spec.directory != vision_spec.directory
+
+
+def test_embedding_gemma_disables_generic_fp16_narrowing_on_migraphx(mocker: MockerFixture) -> None:
+    graph = mocker.patch("immich_ml.models.embedding_gemma2.OrtGraph")
+    mocker.patch(
+        "immich_ml.models.embedding_gemma2._providers_default",
+        return_value=["MIGraphXExecutionProvider", "CPUExecutionProvider"],
+    )
+    mocker.patch("immich_ml.models.embedding_gemma2._disabled_optimizers_default", return_value=[])
+    mocker.patch.object(settings, "model_revision", "v2")
+
+    DynamicOrtSession("/cache/onnx/model.onnx", cache_marker=1)
+
+    spec = graph.call_args.args[0]
+    assert spec.provider == "MIGraphXExecutionProvider"
+    assert spec.half is False
