@@ -63,7 +63,7 @@ FROM python:3.12-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f82419
 
 # Warning: 25GiB+ disk space required to pull this image
 # TODO: find a way to reduce the image size
-FROM rocm/dev-ubuntu-24.04:7.2-complete@sha256:86e11093b4a7ec2a79b1b6701d10e840a6994f21c7e05929b51eb9be361c683a AS builder-rocm
+FROM docker.io/rocm/dev-ubuntu-24.04:7.2-complete@sha256:86e11093b4a7ec2a79b1b6701d10e840a6994f21c7e05929b51eb9be361c683a AS builder-rocm
 
 FROM builder-${DEVICE} AS builder
 
@@ -108,7 +108,7 @@ COPY --from=builder-cuda /usr/local/bin/python3 /usr/local/bin/python3
 COPY --from=builder-cuda /usr/local/lib/python3.13 /usr/local/lib/python3.13
 COPY --from=builder-cuda /usr/local/lib/libpython3.13.so /usr/local/lib/libpython3.13.so
 
-FROM rocm/dev-ubuntu-24.04:7.2-complete@sha256:86e11093b4a7ec2a79b1b6701d10e840a6994f21c7e05929b51eb9be361c683a AS prod-rocm
+FROM docker.io/rocm/dev-ubuntu-24.04:7.2-complete@sha256:86e11093b4a7ec2a79b1b6701d10e840a6994f21c7e05929b51eb9be361c683a AS prod-rocm
 
 RUN apt-get update && apt-get install --no-install-recommends -yqq migraphx miopen-hip && \
     apt-get clean && \

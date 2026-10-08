@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     max_batch_size: MaxBatchSize = MaxBatchSize()
     model_organization: ModelOrganization = ModelOrganization.APP
     model_revision: str = "main"
+    embedding_gemma2_alias: str | None = None
+    embedding_gemma2_repo: str = "onnx-community/embeddinggemma-2-ONNX"
+    embedding_gemma2_revision: str = "main"
+    embedding_gemma2_vision_tokens: int = 280
+    embedding_gemma2_text_context: int = 128
+    embedding_gemma2_visual_context: int = 384
 
     @property
     def legacy_models(self) -> bool:

@@ -5,9 +5,14 @@ from typing import Annotated, Any
 from pydantic import ConfigDict, Field, with_config
 
 from .models.base import InferenceEntry, InferenceModel
-from .models.clip.textual import BaseCLIPTextualEncoder, MClipTextualEncoder, OpenClipTextualEncoder
+from .models.clip.textual import MClipTextualEncoder, OpenClipTextualEncoder
 from .models.clip.visual import OpenClipVisualEncoder
 from .models.constants import get_model_source
+from .models.embedding_gemma2 import (
+    EmbeddingGemma2TextualEncoder,
+    EmbeddingGemma2VisualEncoder,
+    is_embedding_gemma2_alias,
+)
 from .models.facial_recognition.detection import FaceDetector
 from .models.facial_recognition.recognition import FaceRecognizer
 from .models.ocr.detection import TextDetector
@@ -26,8 +31,16 @@ from .schemas import (
 STRICT = ConfigDict(extra="forbid")
 
 
-def textual(model_name: str) -> type[BaseCLIPTextualEncoder]:
+def textual_encoder(model_name: str) -> type[InferenceModel[TextualOptions]]:
+    if is_embedding_gemma2_alias(model_name):
+        return EmbeddingGemma2TextualEncoder
     return MClipTextualEncoder if get_model_source(model_name) == ModelSource.MCLIP else OpenClipTextualEncoder
+
+
+def visual_encoder(model_name: str) -> type[InferenceModel[VisualOptions]]:
+    if is_embedding_gemma2_alias(model_name):
+        return EmbeddingGemma2VisualEncoder
+    return OpenClipVisualEncoder
 
 
 @with_config(STRICT)
@@ -72,9 +85,9 @@ class PipelineRequest:
 
     def entries(self) -> Iterator[InferenceEntry[Any]]:
         if (visual := self.clip.visual) is not None:
-            yield visual.entry(OpenClipVisualEncoder)
+            yield visual.entry(visual_encoder(visual.model_name))
         if (text := self.clip.textual) is not None:
-            yield text.entry(textual(text.model_name))
+            yield text.entry(textual_encoder(text.model_name))
         if (detection := self.facial_recognition.detection) is not None:
             yield detection.entry(FaceDetector)
         if (recognition := self.facial_recognition.recognition) is not None:
