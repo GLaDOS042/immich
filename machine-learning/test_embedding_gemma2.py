@@ -14,6 +14,7 @@ from immich_ml.models.embedding_gemma2 import (
     EmbeddingGemma2TextualEncoder,
     EmbeddingGemma2VisualEncoder,
     PinnedOrtSession,
+    _mask_absent_modalities,
     _normalize_embedding,
     _prepare_image,
     _shape_overrides,
@@ -41,13 +42,13 @@ def _write_shape_model(path: Path) -> None:
     onnx.save(helper.make_model(graph), path)
 
 
-def _text_feed(image_tokens: int = 0) -> dict[str, np.ndarray]:
+def _text_feed(image_tokens: int = 1, video_tokens: int = 1, audio_tokens: int = 1) -> dict[str, np.ndarray]:
     return {
         "input_ids": np.zeros((1, 128), dtype=np.int64),
         "attention_mask": np.ones((1, 128), dtype=np.int64),
-        "image_features": np.empty((image_tokens, 512), dtype=np.float32),
-        "video_features": np.empty((0, 512), dtype=np.float32),
-        "audio_features": np.empty((0, 512), dtype=np.float32),
+        "image_features": np.zeros((image_tokens, 512), dtype=np.float32),
+        "video_features": np.zeros((video_tokens, 512), dtype=np.float32),
+        "audio_features": np.zeros((audio_tokens, 512), dtype=np.float32),
     }
 
 
@@ -129,6 +130,53 @@ def test_tokenize_does_not_duplicate_existing_bos(mocker: MockerFixture) -> None
     assert input_ids.tolist() == [[2, 101, 0, 0]]
 
 
+def test_tokenize_reserves_masked_modality_slots(mocker: MockerFixture) -> None:
+    tokenizer = mocker.Mock()
+    tokenizer.encode.return_value.ids = [101, 102, 103, 104]
+    tokenizer.token_to_id.side_effect = lambda token: {"<bos>": 2, "<pad>": 0}.get(token)
+
+    input_ids, attention_mask = _tokenize(tokenizer, "query", 5, truncate=True, reserve_padding=2)
+
+    assert input_ids.tolist() == [[2, 101, 102, 0, 0]]
+    assert attention_mask.tolist() == [[1, 1, 1, 0, 0]]
+
+
+def test_mask_absent_modalities_uses_attention_masked_nonzero_sentinels() -> None:
+    input_ids = np.asarray([[101, 102, 0, 0, 0]], dtype=np.int64)
+    attention_mask = np.asarray([[1, 1, 0, 0, 0]], dtype=np.int64)
+    config = {"image_token_id": 10, "video_token_id": 11, "audio_token_id": 12}
+
+    ids, mask, media = _mask_absent_modalities(input_ids, attention_mask, config, 512)
+
+    assert ids.tolist() == [[101, 102, 10, 11, 12]]
+    assert mask.tolist() == attention_mask.tolist()
+    assert media["image_features"].shape == (1, 512)
+    assert media["video_features"].shape == (1, 512)
+    assert media["audio_features"].shape == (1, 512)
+    assert all(np.count_nonzero(values) == 0 for values in media.values())
+
+
+def test_mask_absent_modalities_preserves_real_image_features() -> None:
+    input_ids = np.asarray([[10, 10, 10, 10, 0, 0]], dtype=np.int64)
+    attention_mask = np.asarray([[1, 1, 1, 1, 0, 0]], dtype=np.int64)
+    config = {"image_token_id": 10, "video_token_id": 11, "audio_token_id": 12}
+    image_features = np.ones((4, 512), dtype=np.float32)
+
+    ids, mask, media = _mask_absent_modalities(
+        input_ids,
+        attention_mask,
+        config,
+        512,
+        image_features=image_features,
+    )
+
+    assert ids.tolist() == [[10, 10, 10, 10, 11, 12]]
+    assert mask.tolist() == attention_mask.tolist()
+    assert np.array_equal(media["image_features"], image_features)
+    assert media["video_features"].shape == (1, 512)
+    assert media["audio_features"].shape == (1, 512)
+
+
 def test_normalize_embedding_enforces_768_dimensions_and_unit_norm() -> None:
     output = np.arange(1, 769, dtype=np.float32)[None, :]
 
@@ -153,18 +201,18 @@ def test_normalize_embedding_rejects_non_finite_or_zero_vectors() -> None:
         _normalize_embedding(np.zeros((1, 768), dtype=np.float32))
 
 
-def test_shape_overrides_pin_zero_length_media_dimensions(tmp_path: Path) -> None:
+def test_shape_overrides_pin_nonzero_media_dimensions(tmp_path: Path) -> None:
     model_path = tmp_path / "model.onnx"
     _write_shape_model(model_path)
 
     overrides = dict(_shape_overrides(model_path, _text_feed()))
 
     assert overrides == {
-        "audio_tokens": 0,
+        "audio_tokens": 1,
         "batch": 1,
-        "image_tokens": 0,
+        "image_tokens": 1,
         "sequence": 128,
-        "video_tokens": 0,
+        "video_tokens": 1,
     }
 
 
@@ -175,7 +223,7 @@ def test_shape_overrides_change_with_image_token_count(tmp_path: Path) -> None:
     text = dict(_shape_overrides(model_path, _text_feed()))
     image = dict(_shape_overrides(model_path, _text_feed(image_tokens=266)))
 
-    assert text["image_tokens"] == 0
+    assert text["image_tokens"] == 1
     assert image["image_tokens"] == 266
 
 
@@ -195,9 +243,24 @@ def test_multimodal_shapes_get_distinct_migraphx_cache_keys(tmp_path: Path, mock
 
     text_spec = graph.call_args_list[0].args[0]
     image_spec = graph.call_args_list[1].args[0]
-    assert dict(text_spec.overrides)["image_tokens"] == 0
+    assert dict(text_spec.overrides)["image_tokens"] == 1
     assert dict(image_spec.overrides)["image_tokens"] == 266
     assert text_spec.directory != image_spec.directory
+
+
+def test_migraphx_rejects_zero_length_symbolic_dimensions(tmp_path: Path, mocker: MockerFixture) -> None:
+    model_path = tmp_path / "model.onnx"
+    _write_shape_model(model_path)
+    mocker.patch(
+        "immich_ml.models.embedding_gemma2._providers_default",
+        return_value=["MIGraphXExecutionProvider", "CPUExecutionProvider"],
+    )
+    mocker.patch("immich_ml.models.embedding_gemma2._disabled_optimizers_default", return_value=[])
+
+    session = PinnedOrtSession(model_path, cache_marker=1)
+
+    with pytest.raises(RuntimeError, match="zero-length MIGraphX"):
+        session.for_feed(_text_feed(video_tokens=0))
 
 
 def test_multimodal_components_use_separate_ort_cache_markers(tmp_path: Path, mocker: MockerFixture) -> None:
