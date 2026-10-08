@@ -177,6 +177,14 @@ def _run_output(graph: ModelGraph, output_name: str, feed: dict[str, Any]) -> ND
     return graph.run([output_name], filtered)[0]
 
 
+class EmbeddingGemma2GraphSpec(GraphSpec):
+    """Keep the upstream fp32 export intact instead of applying Immich's generic fp16 narrowing."""
+
+    @cached_property
+    def half(self) -> bool:
+        return False
+
+
 class DynamicOrtSession:
     """Immich ORT session that leaves multimodal dimensions dynamic."""
 
@@ -186,7 +194,7 @@ class DynamicOrtSession:
         # Text and vision ONNX files share one source directory. GraphSpec normally keys its
         # prepared/provider cache by the pinned dimensions under that directory, so give each
         # component a distinct cache-only marker while leaving free-dimension overrides empty.
-        spec = GraphSpec(
+        spec = EmbeddingGemma2GraphSpec(
             Path(model_path),
             {"embedding_gemma2_component": cache_marker},
             [],
