@@ -139,7 +139,7 @@ def test_multimodal_components_use_separate_ort_cache_markers(mocker: MockerFixt
     assert text_spec.directory != vision_spec.directory
 
 
-def test_embedding_gemma_disables_generic_fp16_narrowing_on_migraphx(mocker: MockerFixture) -> None:
+def test_embedding_gemma_disables_generic_fp16_and_rewrites_on_migraphx(mocker: MockerFixture) -> None:
     graph = mocker.patch("immich_ml.models.embedding_gemma2.OrtGraph")
     mocker.patch(
         "immich_ml.models.embedding_gemma2._providers_default",
@@ -153,3 +153,4 @@ def test_embedding_gemma_disables_generic_fp16_narrowing_on_migraphx(mocker: Moc
     spec = graph.call_args.args[0]
     assert spec.provider == "MIGraphXExecutionProvider"
     assert spec.half is False
+    assert spec.plan.rewrites == ()
