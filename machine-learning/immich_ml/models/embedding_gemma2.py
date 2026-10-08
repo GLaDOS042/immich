@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-from functools import cached_property
+from functools import cache, cached_property
 from pathlib import Path
+from threading import Lock
 from typing import Any, ClassVar, cast
 
 import numpy as np
+import onnx
 from huggingface_hub import snapshot_download
 from immich_model.runtime import RewritePlan
 from numpy.typing import NDArray
@@ -197,6 +200,56 @@ def _normalize_embedding(output: NDArray[Any]) -> NDArray[np.float32]:
     return normalized
 
 
+@cache
+def _model_input_shapes(model_path: Path) -> dict[str, tuple[int | str | None, ...]]:
+    model = onnx.load(model_path.as_posix(), load_external_data=False)
+    shapes: dict[str, tuple[int | str | None, ...]] = {}
+    for node in model.graph.input:
+        dims: list[int | str | None] = []
+        for dim in node.type.tensor_type.shape.dim:
+            if dim.dim_param:
+                dims.append(dim.dim_param)
+            elif dim.HasField("dim_value"):
+                dims.append(int(dim.dim_value))
+            else:
+                dims.append(None)
+        shapes[node.name] = tuple(dims)
+    return shapes
+
+
+def _shape_overrides(model_path: Path, feed: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+    declared_shapes = _model_input_shapes(model_path)
+    overrides: dict[str, int] = {}
+    for input_name, declared in declared_shapes.items():
+        if input_name not in feed:
+            continue
+        actual = np.asarray(feed[input_name]).shape
+        if len(actual) != len(declared):
+            raise RuntimeError(
+                f"EmbeddingGemma 2 input '{input_name}' has rank {len(actual)}, expected {len(declared)}"
+            )
+        for axis, (declared_dim, actual_dim) in enumerate(zip(declared, actual, strict=True)):
+            size = int(actual_dim)
+            if isinstance(declared_dim, int):
+                if declared_dim != size:
+                    raise RuntimeError(
+                        f"EmbeddingGemma 2 input '{input_name}' axis {axis} is {size}, expected {declared_dim}"
+                    )
+            elif isinstance(declared_dim, str):
+                if declared_dim in overrides and overrides[declared_dim] != size:
+                    raise RuntimeError(
+                        f"EmbeddingGemma 2 symbolic dimension '{declared_dim}' has conflicting sizes "
+                        f"{overrides[declared_dim]} and {size}"
+                    )
+                overrides[declared_dim] = size
+            else:
+                raise RuntimeError(
+                    f"EmbeddingGemma 2 input '{input_name}' axis {axis} is dynamic but has no symbolic name; "
+                    "MIGraphX requires it to be pinned"
+                )
+    return tuple(sorted(overrides.items()))
+
+
 class EmbeddingGemma2GraphSpec(GraphSpec):
     """Prepare the external graph without Immich-specific narrowing or rewrites."""
 
@@ -209,33 +262,54 @@ class EmbeddingGemma2GraphSpec(GraphSpec):
         return RewritePlan((), "embeddinggemma2-none")
 
 
-class DynamicOrtSession:
-    """Immich ORT session that leaves multimodal dimensions dynamic."""
+class PinnedOrtSession:
+    """Build one concrete-shape ORT graph per EmbeddingGemma request shape."""
 
     def __init__(self, model_path: Path | str, cache_marker: int, threads: int = 2) -> None:
-        providers = _providers_default()
-        disabled_optimizers = _disabled_optimizers_default(providers)
-        # Text and vision ONNX files share one source directory. GraphSpec normally keys its
-        # prepared/provider cache by the pinned dimensions under that directory, so give each
-        # component a distinct cache-only marker while leaving free-dimension overrides empty.
-        spec = EmbeddingGemma2GraphSpec(
-            Path(model_path),
-            {"embedding_gemma2_component": cache_marker},
-            [],
-            providers,
-            disabled_optimizers,
-            threads,
-        )
-        self.graph = OrtGraph(spec)
+        self.model_path = Path(model_path)
+        self.cache_marker = cache_marker
+        self.providers = _providers_default()
+        self.disabled_optimizers = _disabled_optimizers_default(self.providers)
+        self.threads = threads
+        self.graphs: dict[tuple[tuple[str, int], ...], OrtGraph] = {}
+        self.lock = Lock()
         self.shapes = (Shape(batch=1),)
         self.batches = (1,)
 
+    def for_feed(self, feed: dict[str, Any]) -> ModelGraph:
+        overrides = _shape_overrides(self.model_path, feed)
+        if (graph := self.graphs.get(overrides)) is not None:
+            return graph
+
+        with self.lock:
+            if (graph := self.graphs.get(overrides)) is not None:
+                return graph
+
+            digest = hashlib.sha256(repr(overrides).encode()).digest()
+            shape_marker = int.from_bytes(digest[:8], "big")
+            pins = {
+                "embedding_gemma2_component": self.cache_marker,
+                "embedding_gemma2_shape": shape_marker,
+            }
+            log.info(f"Specializing {self.model_path} for {self.providers[0]} {dict(overrides)}")
+            spec = EmbeddingGemma2GraphSpec(
+                self.model_path,
+                pins,
+                list(overrides),
+                self.providers,
+                self.disabled_optimizers,
+                self.threads,
+            )
+            graph = self.graphs[overrides] = OrtGraph(spec)
+            return graph
+
     def for_shape(self, shape: Shape) -> ModelGraph:
-        return self.graph
+        if len(self.graphs) == 1:
+            return next(iter(self.graphs.values()))
+        raise RuntimeError("EmbeddingGemma 2 needs the concrete input feed before selecting a MIGraphX graph")
 
     def warm(self) -> None:
-        # A valid warm-up needs coordinated placeholder and media-feature counts.
-        # Session construction already prepares the graph for the selected EP.
+        # A valid warm-up needs the real multimodal feed so every symbolic dimension can be specialized.
         pass
 
 
@@ -301,11 +375,10 @@ class BaseEmbeddingGemma2Encoder[O: Options](InferenceModel[O]):
         raise NotImplementedError
 
     def _load(self) -> ModelSession:
-        return DynamicOrtSession(self.model_path, cache_marker=1, threads=self.threads)
+        return PinnedOrtSession(self.model_path, cache_marker=1, threads=self.threads)
 
     def build(self) -> None:
-        # The generic OrtSession warm-up cannot synthesize valid zero-length
-        # media tensors for this multimodal graph.
+        # Graph creation is deferred until the first real feed so MIGraphX sees only concrete dimensions.
         self.load()
 
     def _main_embedding(
@@ -315,7 +388,6 @@ class BaseEmbeddingGemma2Encoder[O: Options](InferenceModel[O]):
         *,
         image_features: NDArray[np.float32] | None = None,
     ) -> str:
-        graph = self.session.for_shape(Shape(batch=1))
         empty = np.empty((0, self.hidden_size), dtype=np.float32)
         feed: dict[str, Any] = {
             "input_ids": input_ids,
@@ -324,6 +396,8 @@ class BaseEmbeddingGemma2Encoder[O: Options](InferenceModel[O]):
             "video_features": empty,
             "audio_features": empty,
         }
+        session = cast(PinnedOrtSession, self.session)
+        graph = session.for_feed(feed)
         embedding = _normalize_embedding(_run_output(graph, "sentence_embedding", feed))
         return serialize_np_array(embedding)
 
@@ -361,7 +435,7 @@ class EmbeddingGemma2VisualEncoder(BaseEmbeddingGemma2Encoder[VisualOptions]):
         return self.model_dir / "vision_encoder.onnx"
 
     def _load(self) -> ModelSession:
-        self.vision_session = DynamicOrtSession(self.vision_model_path, cache_marker=2, threads=self.threads)
+        self.vision_session = PinnedOrtSession(self.vision_model_path, cache_marker=2, threads=self.threads)
         return super()._load()
 
     def unload(self) -> None:
@@ -385,11 +459,11 @@ class EmbeddingGemma2VisualEncoder(BaseEmbeddingGemma2Encoder[VisualOptions]):
             rescale_factor=rescale_factor,
         )
 
-        vision_graph = self.vision_session.for_shape(Shape(batch=1))
         vision_feed: dict[str, Any] = {
             "pixel_values": pixel_values,
             "pixel_position_ids": position_ids,
         }
+        vision_graph = self.vision_session.for_feed(vision_feed)
         image_features = np.asarray(_run_output(vision_graph, "image_features", vision_feed), dtype=np.float32)
         if image_features.ndim == 3 and image_features.shape[0] == 1:
             image_features = image_features[0]
