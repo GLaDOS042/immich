@@ -4,7 +4,7 @@ import json
 import math
 from functools import cached_property
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import numpy as np
 from huggingface_hub import snapshot_download
@@ -193,7 +193,8 @@ def _normalize_embedding(output: NDArray[Any]) -> NDArray[np.float32]:
     norm = float(np.linalg.norm(embedding))
     if not math.isfinite(norm) or norm <= 0:
         raise RuntimeError("EmbeddingGemma 2 returned a zero or invalid embedding norm")
-    return embedding / norm
+    normalized: NDArray[np.float32] = np.asarray(embedding / norm, dtype=np.float32)
+    return normalized
 
 
 class EmbeddingGemma2GraphSpec(GraphSpec):
@@ -280,12 +281,12 @@ class BaseEmbeddingGemma2Encoder[O: Options](InferenceModel[O]):
     @cached_property
     def model_cfg(self) -> dict[str, Any]:
         with (self.cache_dir / "config.json").open(encoding="utf-8") as file:
-            return json.load(file)
+            return cast(dict[str, Any], json.load(file))
 
     @cached_property
     def processor_cfg(self) -> dict[str, Any]:
         with (self.cache_dir / "processor_config.json").open(encoding="utf-8") as file:
-            return json.load(file)
+            return cast(dict[str, Any], json.load(file))
 
     @cached_property
     def tokenizer(self) -> Tokenizer:
