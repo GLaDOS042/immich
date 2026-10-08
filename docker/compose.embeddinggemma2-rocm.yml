@@ -1,0 +1,12 @@
+services:
+  immich-machine-learning:
+    image: localhost/immich-machine-learning:embeddinggemma2-rocm
+    pull_policy: never
+    group_add:
+      - video
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    environment:
+      MACHINE_LEARNING_EMBEDDING_GEMMA2_ALIAS: ViT-B-16-SigLIP-256__webli
+      MACHINE_LEARNING_EMBEDDING_GEMMA2_VISION_TOKENS: "280"
