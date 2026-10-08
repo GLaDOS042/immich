@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 from huggingface_hub import snapshot_download
+from immich_model.runtime import RewritePlan
 from numpy.typing import NDArray
 from PIL import Image
 from tokenizers import Tokenizer
@@ -196,11 +197,15 @@ def _normalize_embedding(output: NDArray[Any]) -> NDArray[np.float32]:
 
 
 class EmbeddingGemma2GraphSpec(GraphSpec):
-    """Keep the upstream fp32 export intact instead of applying Immich's generic fp16 narrowing."""
+    """Prepare the external graph without Immich-specific narrowing or rewrites."""
 
     @cached_property
     def half(self) -> bool:
         return False
+
+    @property
+    def plan(self) -> RewritePlan:
+        return RewritePlan((), "embeddinggemma2-none")
 
 
 class DynamicOrtSession:
