@@ -9,6 +9,7 @@ from immich_ml.models.embedding_gemma2 import (
     EmbeddingGemma2TextualEncoder,
     EmbeddingGemma2VisualEncoder,
     _prepare_image,
+    _tokenize,
     is_embedding_gemma2_alias,
 )
 from immich_ml.pipeline import Clip, PipelineRequest, Slot
@@ -73,6 +74,27 @@ def test_square_image_uses_256_soft_tokens_at_default_budget() -> None:
     _, _, soft_tokens = _prepare_image(image, 280)
 
     assert soft_tokens == 256
+
+
+def test_tokenize_adds_single_gemma_bos_and_padding(mocker: MockerFixture) -> None:
+    tokenizer = mocker.Mock()
+    tokenizer.encode.return_value.ids = [101, 102]
+    tokenizer.token_to_id.side_effect = lambda token: {"<bos>": 2, "<pad>": 0}.get(token)
+
+    input_ids, attention_mask = _tokenize(tokenizer, "query", 5, truncate=True)
+
+    assert input_ids.tolist() == [[2, 101, 102, 0, 0]]
+    assert attention_mask.tolist() == [[1, 1, 1, 0, 0]]
+
+
+def test_tokenize_does_not_duplicate_existing_bos(mocker: MockerFixture) -> None:
+    tokenizer = mocker.Mock()
+    tokenizer.encode.return_value.ids = [2, 101]
+    tokenizer.token_to_id.side_effect = lambda token: {"<bos>": 2, "<pad>": 0}.get(token)
+
+    input_ids, _ = _tokenize(tokenizer, "query", 4, truncate=True)
+
+    assert input_ids.tolist() == [[2, 101, 0, 0]]
 
 
 def test_multimodal_components_use_separate_ort_cache_markers(mocker: MockerFixture) -> None:
